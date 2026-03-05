@@ -8,12 +8,14 @@ Zero false positives. CobraSEC.
 import re
 import sys
 import json
+import time
 import socket
 import shutil
 import argparse
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -44,7 +46,8 @@ BANNER = r"""[bold cyan]
 # ── Config ────────────────────────────────────────────────────────────────────
 
 CONFIG_FILE = Path.home() / ".config" / "subvenom" / "config.yaml"
-TIMEOUT = 10
+TIMEOUT = 15         # default HTTP probe / fast API timeout
+TIMEOUT_SLOW = 60    # crt.sh, webarchive — slow sources (set to None to disable)
 MAX_WORKERS = 30
 
 console = Console()
@@ -123,7 +126,7 @@ def source_crtsh(domain: str) -> set[str]:
     try:
         r = requests.get(
             f"https://crt.sh/?q=%.{domain}&output=json",
-            timeout=TIMEOUT, headers=HEADERS
+            timeout=TIMEOUT_SLOW, headers=HEADERS
         )
         if r.status_code == 200:
             data = r.json()
@@ -161,19 +164,23 @@ def source_hackertarget(domain: str) -> set[str]:
 
 
 def source_alienvault(domain: str) -> set[str]:
-    try:
-        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns"
-        r = requests.get(url, timeout=TIMEOUT, headers=HEADERS)
-        if r.status_code == 200:
-            data = r.json()
-            subs = set()
-            for entry in data.get("passive_dns", []):
-                h = entry.get("hostname", "").lower().lstrip("*.")
-                if h.endswith(f".{domain}") or h == domain:
-                    subs.add(h)
-            return subs
-    except Exception:
-        pass
+    url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns"
+    for attempt in range(3):
+        try:
+            r = requests.get(url, timeout=TIMEOUT, headers=HEADERS)
+            if r.status_code == 429:
+                time.sleep(3 * (attempt + 1))
+                continue
+            if r.status_code == 200:
+                data = r.json()
+                subs = set()
+                for entry in data.get("passive_dns", []):
+                    h = entry.get("hostname", "").lower().lstrip("*.")
+                    if h.endswith(f".{domain}") or h == domain:
+                        subs.add(h)
+                return subs
+        except Exception:
+            pass
     return set()
 
 
@@ -234,15 +241,22 @@ def source_anubis(domain: str) -> set[str]:
 def source_webarchive(domain: str) -> set[str]:
     try:
         r = requests.get(
-            f"https://web.archive.org/cdx/search/cdx?url=*.{domain}&output=text&fl=original&collapse=urlkey&limit=5000",
-            timeout=TIMEOUT * 2, headers=HEADERS
+            f"https://web.archive.org/cdx/search/cdx?url=*.{domain}&output=text&fl=original&collapse=urlkey&limit=10000",
+            timeout=TIMEOUT_SLOW, headers=HEADERS
         )
-        if r.status_code == 200:
+        if r.status_code == 200 and r.text.strip():
             subs = set()
-            for match in re.findall(r'https?://([\w\-\.]+\.' + re.escape(domain) + r')', r.text):
-                sub = match.lower()
-                if sub.endswith(f".{domain}") or sub == domain:
-                    subs.add(sub)
+            for line in r.text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    host = urlparse(line).hostname or ""
+                    host = host.lower().lstrip("*.")
+                    if host.endswith(f".{domain}") or host == domain:
+                        subs.add(host)
+                except Exception:
+                    pass
             return subs
     except Exception:
         pass
@@ -274,8 +288,8 @@ def source_subfinder(domain: str) -> set[str]:
         return set()
     try:
         result = subprocess.run(
-            ["subfinder", "-d", domain, "-silent", "-all"],
-            capture_output=True, text=True, timeout=60
+            ["subfinder", "-d", domain, "-silent"],
+            capture_output=True, text=True, timeout=120
         )
         subs = set()
         for line in result.stdout.splitlines():
@@ -294,7 +308,7 @@ def source_assetfinder(domain: str) -> set[str]:
     try:
         result = subprocess.run(
             ["assetfinder", "--subs-only", domain],
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=90
         )
         subs = set()
         for line in result.stdout.splitlines():
@@ -478,15 +492,27 @@ SOURCES = {
 }
 
 
-def gather_subdomains(domain: str, config: dict) -> dict[str, set[str]]:
-    """Run all sources concurrently and return {source: {subdomains}}."""
+def gather_subdomains(domain: str, config: dict, source_timeout=None) -> dict[str, set[str]]:
+    """Run all sources concurrently and return {source: {subdomains}}.
+    source_timeout: seconds to wait for all passive sources (None = no limit).
+    """
+    global TIMEOUT, TIMEOUT_SLOW
+    if source_timeout is not None:
+        if source_timeout == 0:
+            # --no-timeout: let requests block indefinitely
+            TIMEOUT = None
+            TIMEOUT_SLOW = None
+        else:
+            TIMEOUT = source_timeout
+            TIMEOUT_SLOW = source_timeout
+
     results = {}
 
     def run_source(name, fn):
         subs = fn(domain)
         return name, subs
 
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    with ThreadPoolExecutor(max_workers=15) as ex:
         futures = {ex.submit(run_source, n, f): n for n, f in SOURCES.items()}
 
         # Add tool-based sources
@@ -500,6 +526,8 @@ def gather_subdomains(domain: str, config: dict) -> dict[str, set[str]]:
         if shodan_key:
             futures[ex.submit(run_source, "Shodan", lambda d: source_shodan(d, shodan_key))] = "Shodan"
 
+        # Wait with optional global timeout per-source (as_completed has no global cap —
+        # individual source functions handle their own timeouts via requests/subprocess)
         for f in as_completed(futures):
             name, subs = f.result()
             results[name] = subs
@@ -539,24 +567,77 @@ def save_report_multi(domain: str, live_hosts: list[dict], dead: set[str],
     return saved
 
 
-def _save_and_exit(domain, all_subs, live_hosts, resolved, source_counts, output_dir, fmt):
-    """Save results and print summary for early-exit modes."""
+def _save_passive_markdown(domain: str, all_subs: set, source_counts: dict, output_dir: str | None) -> str:
+    """Write a clean passive-mode markdown — no duplicate DNS sections."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"subvenom_{domain}_{ts}.md"
     if output_dir:
-        base = Path(output_dir).expanduser().resolve()
+        path = Path(output_dir).expanduser().resolve() / filename
     else:
-        base = Path.home() / "bughunt" / domain / "recon"
-    base.mkdir(parents=True, exist_ok=True)
+        path = Path.home() / "bughunt" / domain / "recon" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Always save plain txt list of subdomains
-    txt_path = base / f"subvenom_{domain}_{ts}_subs.txt"
-    txt_path.write_text("\n".join(sorted(all_subs)))
+    active_sources = sum(1 for c in source_counts.values() if c > 0)
+    lines = [
+        f"# SubVenom Passive Report — {domain}",
+        f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"**Mode:** Passive (no DNS resolution, no HTTP probing)",
+        "",
+        "---",
+        "",
+        "## Summary",
+        "",
+        "| Metric | Count |",
+        "|--------|-------|",
+        f"| Raw results across all sources | {sum(source_counts.values())} |",
+        f"| Unique subdomains (deduplicated) | {len(all_subs)} |",
+        f"| Sources with results | {active_sources} / {len(source_counts)} |",
+        "",
+        "---",
+        "",
+        "## Sources",
+        "",
+        "| Source | Subdomains Found | |",
+        "|--------|-----------------|---|",
+    ]
+    for src, count in sorted(source_counts.items(), key=lambda x: -x[1]):
+        status = "✓" if count > 0 else "✗"
+        lines.append(f"| {src} | {count} | {status} |")
+    lines += [
+        "",
+        "---",
+        "",
+        f"## All Subdomains — {len(all_subs)} unique",
+        f"_Tip: Run `subvenom {domain} --mode subs-only` to validate via DNS, "
+        f"or `--mode full` for HTTP + tech stack._",
+        "",
+    ]
+    for s in sorted(all_subs):
+        lines.append(f"- `{s}`")
+    path.write_text("\n".join(lines))
+    return str(path)
+
+
+def _save_and_exit(domain, all_subs, live_hosts, resolved, source_counts, output_dir, fmt):
+    """Save results and print summary for early-exit modes (passive / subs-only)."""
+    formats = [f.strip() for f in fmt.split(",")]
+    saved = []
+
+    for f in formats:
+        if f == "markdown" and not resolved:
+            # Passive mode: use clean passive markdown (no duplicate DNS-only section)
+            path = _save_passive_markdown(domain, all_subs, source_counts, output_dir)
+        else:
+            # subs-only or non-markdown: use standard report (has resolved data)
+            dns_only = all_subs - set((resolved or {}).keys()) - {h["hostname"] for h in (live_hosts or [])}
+            path = save_report(domain, live_hosts or [], dns_only, source_counts, output_dir, f, resolved or {})
+        saved.append(path)
 
     console.print()
     console.print(Panel(
         f"[dim white]Subdomains found:[/dim white] [bold green]{len(all_subs)}[/bold green]  "
         f"[dim red]|[/dim red]  "
-        f"[dim white]Saved:[/dim white] [bold green]{txt_path}[/bold green]",
+        f"[dim white]Saved:[/dim white] [bold green]{', '.join(saved)}[/bold green]",
         border_style="green", expand=False, title="[bold green][ COMPLETE ][/bold green]"
     ))
 
@@ -717,6 +798,7 @@ def run(
     threads: int = MAX_WORKERS,
     timeout: int = TIMEOUT,
     wordlist: str | None = None, # DNS bruteforce wordlist
+    source_timeout: int | None = None,  # per-request timeout for passive sources (None = use defaults)
 ):
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -753,7 +835,7 @@ def run(
         print_section("PHASE 1 — PASSIVE ENUMERATION")
         console.print("  [dim green][*] Querying all sources in parallel...[/dim green]")
 
-        source_results = gather_subdomains(domain, config)
+        source_results = gather_subdomains(domain, config, source_timeout=source_timeout)
 
         for src, subs in source_results.items():
             source_counts[src] = len(subs)
@@ -956,6 +1038,12 @@ Examples:
     # Bruteforce
     parser.add_argument("--wordlist", metavar="FILE", help="DNS bruteforce wordlist path")
 
+    # Timeouts
+    parser.add_argument("--source-timeout", type=int, default=None, metavar="SEC",
+        help="Per-request timeout for passive sources in seconds (default: 15 fast, 60 slow)")
+    parser.add_argument("--no-timeout", action="store_true",
+        help="Disable all source timeouts — wait as long as needed (useful for crt.sh on huge domains)")
+
     # Config
     parser.add_argument("--set-shodan", metavar="KEY", help="Save Shodan API key to config")
     parser.add_argument("--no-banner", action="store_true", help="Suppress banner")
@@ -983,6 +1071,15 @@ Examples:
         d = re.sub(r"^https?://", "", d).rstrip("/")
         if i > 0:
             console.print("\n" + "═" * 80 + "\n")
+        # Resolve source timeout setting
+        # 0 = no timeout (block indefinitely), None = use module defaults, N = set to N
+        if args.no_timeout:
+            src_timeout = 0      # signals gather_subdomains to set requests timeout=None
+        elif args.source_timeout:
+            src_timeout = args.source_timeout
+        else:
+            src_timeout = None   # use module defaults (TIMEOUT=15, TIMEOUT_SLOW=60)
+
         run(
             d,
             output_dir=args.output,
@@ -996,6 +1093,7 @@ Examples:
             threads=args.threads,
             timeout=args.timeout,
             wordlist=args.wordlist,
+            source_timeout=src_timeout,
         )
 
 
