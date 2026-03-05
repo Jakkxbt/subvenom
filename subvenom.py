@@ -30,15 +30,15 @@ from rich import box
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 
-BANNER = r"""
-[bold green] ░▒▓[/bold green][bold white]  ▄▄▄▄▄ ▄• ▄▌▄▄▄▄·  ▌ ▐·▄▄▄ . ▐ ▄       • ▌ ▄ ·. [/bold white][bold green]▓▒░[/bold green]
-[bold green] ░▒▓[/bold green][bold white]  •██  █▪██▌▐█ ▀█▪▪█·█▌▀▄.▀·•█▌▐█▪     •█▌▐█ ▌░▄▄██[/bold white][bold green]▓▒░[/bold green]
-[bold green] ░▒▓[/bold green][bold white]   ▐█.▪█▌▐█▌▐█▀▀█▄▐█▐█•▐▀▀▪▄▐█▐▐▌ ▄█▀▄ ▐█▐▐▌▐▀▀▄ ▐█·[/bold white][bold green]▓▒░[/bold green]
-[bold green] ░▒▓[/bold green][bold white]   ▐█▌·▐█▄█▌██▄▪▐█ ███ ▐█▄▄▌██▐█▌▐█▌.▐▌██▐█▌▐█•█▌▐█▌[/bold white][bold green]▓▒░[/bold green]
-[bold green] ░▒▓[/bold green][bold white]   ▀▀▀  ▀▀▀ ·▀▀▀▀ ▀ ▀  ▀▀▀ ▀▀ █▪ ▀█▄▀▪▀▀ █▪.▀  ▀▀▀▀[/bold white][bold green]▓▒░[/bold green]
-
-[dim green]  ◈  passive dns  ·  cert logs  ·  shodan  ·  tech stack  ·  live only  ◈[/dim green]
-[dim white]                         CobraSEC  ·  v0.1.0[/dim white]
+BANNER = r"""[bold cyan]
+  ███████╗██╗   ██╗██████╗ ██╗   ██╗███████╗███╗   ██╗ ██████╗ ███╗   ███╗
+  ██╔════╝██║   ██║██╔══██╗██║   ██║██╔════╝████╗  ██║██╔═══██╗████╗ ████║
+  ███████╗██║   ██║██████╔╝██║   ██║█████╗  ██╔██╗ ██║██║   ██║██╔████╔██║
+  ╚════██║██║   ██║██╔══██╗╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║
+  ███████║╚██████╔╝██████╔╝ ╚████╔╝ ███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║
+  ╚══════╝ ╚═════╝ ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝[/bold cyan]
+[dim cyan]  >=( passive dns · cert logs · shodan · tech stack · live only )=>[/dim cyan]
+[dim white]                          CobraSEC  ·  v0.1.0[/dim white]
 """
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -212,17 +212,17 @@ def source_rapiddns(domain: str) -> set[str]:
     return set()
 
 
-def source_threatcrowd(domain: str) -> set[str]:
+def source_anubis(domain: str) -> set[str]:
     try:
         r = requests.get(
-            f"https://www.threatcrowd.org/searchApi/v2/domain/report/?domain={domain}",
+            f"https://jldc.me/anubis/subdomains/{domain}",
             timeout=TIMEOUT, headers=HEADERS
         )
         if r.status_code == 200:
             data = r.json()
             subs = set()
-            for sub in data.get("subdomains", []):
-                sub = sub.lower().lstrip("*.")
+            for sub in (data if isinstance(data, list) else []):
+                sub = str(sub).lower().lstrip("*.")
                 if sub.endswith(f".{domain}") or sub == domain:
                     subs.add(sub)
             return subs
@@ -231,21 +231,18 @@ def source_threatcrowd(domain: str) -> set[str]:
     return set()
 
 
-def source_bufferover(domain: str) -> set[str]:
+def source_webarchive(domain: str) -> set[str]:
     try:
         r = requests.get(
-            f"https://dns.bufferover.run/dns?q=.{domain}",
-            timeout=TIMEOUT, headers=HEADERS
+            f"https://web.archive.org/cdx/search/cdx?url=*.{domain}&output=text&fl=original&collapse=urlkey&limit=5000",
+            timeout=TIMEOUT * 2, headers=HEADERS
         )
         if r.status_code == 200:
-            data = r.json()
             subs = set()
-            for entry in data.get("FDNS_A", []) + data.get("RDNS", []):
-                parts = entry.split(",")
-                for p in parts:
-                    p = p.strip().lower()
-                    if p.endswith(f".{domain}") or p == domain:
-                        subs.add(p)
+            for match in re.findall(r'https?://([\w\-\.]+\.' + re.escape(domain) + r')', r.text):
+                sub = match.lower()
+                if sub.endswith(f".{domain}") or sub == domain:
+                    subs.add(sub)
             return subs
     except Exception:
         pass
@@ -471,13 +468,13 @@ def print_section(title: str):
 # ── Source Runner ─────────────────────────────────────────────────────────────
 
 SOURCES = {
-    "crt.sh":       source_crtsh,
-    "HackerTarget": source_hackertarget,
-    "AlienVault":   source_alienvault,
-    "URLScan":      source_urlscan,
-    "RapidDNS":     source_rapiddns,
-    "ThreatCrowd":  source_threatcrowd,
-    "BufferOver":   source_bufferover,
+    "crt.sh":       source_crtsh,        # cert transparency — very reliable
+    "HackerTarget": source_hackertarget, # passive DNS
+    "AlienVault":   source_alienvault,   # threat intel (may rate limit)
+    "URLScan":      source_urlscan,      # web crawl dataset
+    "RapidDNS":     source_rapiddns,     # passive DNS
+    "Anubis":       source_anubis,       # subdomain dataset
+    "WebArchive":   source_webarchive,   # wayback machine URLs
 }
 
 
@@ -612,32 +609,94 @@ def save_report(domain: str, live_hosts: list[dict], dead: set[str],
         path.write_text("\n".join(lines))
 
     else:  # markdown (default)
+        all_subs = set(h["hostname"] for h in live_hosts) | (dead or set()) | set((resolved or {}).keys())
         lines = [
             f"# SubVenom Report — {domain}",
             f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"**Live Hosts:** {len(live_hosts)}",
-            f"**Total Subdomains:** {sum(source_counts.values())}",
+            "",
+            "---",
+            "",
+            "## Summary",
+            "",
+            f"| Metric | Count |",
+            f"|--------|-------|",
+            f"| Total subdomains enumerated | {sum(source_counts.values())} |",
+            f"| Unique subdomains (deduplicated) | {len(all_subs)} |",
+            f"| DNS resolved | {len((resolved or {}))} |",
+            f"| Live HTTP hosts | {len(live_hosts)} |",
+            f"| DNS only (no HTTP) | {len(dead)} |",
+            "",
+            "---",
             "",
             "## Sources",
             "",
+            "| Source | Subdomains Found |",
+            "|--------|-----------------|",
         ]
         for src, count in sorted(source_counts.items(), key=lambda x: -x[1]):
-            lines.append(f"- **{src}**: {count}")
-        lines.append("")
-        lines += ["## Live Hosts", ""]
-        lines += ["| Subdomain | Status | Title | Tech Stack | IP |",
-                  "|-----------|--------|-------|------------|----|"]
+            status = "✓" if count > 0 else "✗ (no results)"
+            lines.append(f"| {src} | {count} {status} |")
+        lines += [
+            "",
+            "---",
+            "",
+            "## All Subdomains Enumerated",
+            f"_{len(all_subs)} unique subdomains found across all sources_",
+            "",
+        ]
+        for s in sorted(all_subs):
+            lines.append(f"- `{s}`")
+        lines += [
+            "",
+            "---",
+            "",
+            "## DNS Resolved",
+            f"_{len((resolved or {}))} subdomains confirmed with valid DNS A records_",
+            "",
+            "| Subdomain | IP Address |",
+            "|-----------|-----------|",
+        ]
+        for h, ip in sorted((resolved or {}).items()):
+            lines.append(f"| `{h}` | `{ip}` |")
+        lines += [
+            "",
+            "---",
+            "",
+            "## Live HTTP Hosts",
+            f"_{len(live_hosts)} hosts confirmed responding over HTTP/HTTPS_",
+            "",
+            "| Subdomain | Status | Title | IP |",
+            "|-----------|--------|-------|----|",
+        ]
         for h in sorted(live_hosts, key=lambda x: x["status"]):
             ip = (resolved or {}).get(h["hostname"], "")
-            tech_str = ", ".join(h["tech"]) if h["tech"] else "—"
-            title = h["title"][:50] if h["title"] else "—"
-            lines.append(f"| `{h['hostname']}` | {h['status']} | {title} | {tech_str} | {ip} |")
-        lines.append("")
-        if dead:
-            lines += ["## DNS Only (No HTTP)", ""]
-            for d in sorted(dead):
-                ip = (resolved or {}).get(d, "")
-                lines.append(f"- `{d}` — {ip}")
+            title = h["title"][:60] if h["title"] else "—"
+            lines.append(f"| `{h['hostname']}` | **{h['status']}** | {title} | `{ip}` |")
+        lines += [
+            "",
+            "---",
+            "",
+            "## Tech Stack",
+            f"_Technology fingerprints detected on live hosts_",
+            "",
+            "| Subdomain | Technologies |",
+            "|-----------|-------------|",
+        ]
+        for h in sorted(live_hosts, key=lambda x: x["hostname"]):
+            if h["tech"]:
+                tech_str = ", ".join(h["tech"])
+                lines.append(f"| `{h['hostname']}` | {tech_str} |")
+        lines += [
+            "",
+            "---",
+            "",
+            "## DNS Only (No HTTP Response)",
+            f"_{len(dead)} subdomains with DNS records but no HTTP response_",
+            "",
+        ]
+        for d in sorted(dead):
+            ip = (resolved or {}).get(d, "")
+            lines.append(f"- `{d}` → `{ip}`")
         path.write_text("\n".join(lines))
 
     return str(path)
