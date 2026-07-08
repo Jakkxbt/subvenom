@@ -11,12 +11,13 @@ Aggregates subdomains from 9+ sources, resolves DNS, confirms live HTTP hosts, a
 | Source | Type |
 |--------|------|
 | crt.sh | Certificate transparency |
+| CertSpotter | Certificate transparency (reliable crt.sh backup) |
 | HackerTarget | Passive DNS |
 | AlienVault OTX | Threat intel DNS |
 | URLScan.io | Web crawl dataset |
 | RapidDNS | Passive DNS |
-| ThreatCrowd | DNS dataset |
-| BufferOver | DNS recon |
+| Anubis | Subdomain dataset |
+| WebArchive | Wayback Machine URLs |
 | subfinder | Tool (if installed) |
 | assetfinder | Tool (if installed) |
 | Shodan | API (optional) |

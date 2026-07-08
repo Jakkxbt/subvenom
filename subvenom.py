@@ -32,15 +32,13 @@ from rich import box
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 
-BANNER = r"""[bold cyan]
-  ███████╗██╗   ██╗██████╗ ██╗   ██╗███████╗███╗   ██╗ ██████╗ ███╗   ███╗
-  ██╔════╝██║   ██║██╔══██╗██║   ██║██╔════╝████╗  ██║██╔═══██╗████╗ ████║
-  ███████╗██║   ██║██████╔╝██║   ██║█████╗  ██╔██╗ ██║██║   ██║██╔████╔██║
-  ╚════██║██║   ██║██╔══██╗╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║
-  ███████║╚██████╔╝██████╔╝ ╚████╔╝ ███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║
-  ╚══════╝ ╚═════╝ ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝[/bold cyan]
-[dim cyan]  >=( passive dns · cert logs · shodan · tech stack · live only )=>[/dim cyan]
-[dim white]                          CobraSEC  ·  v0.1.0[/dim white]
+BANNER = r"""
+[bold green]  ███████╗██╗   ██╗██████╗ ██╗   ██╗███████╗███╗   ██╗ ██████╗ ███╗   ███╗[/bold green]
+[bold green]  ██╔════╝██║   ██║██╔══██╗██║   ██║██╔════╝████╗  ██║██╔═══██╗████╗ ████║[/bold green]
+[bold green]  ███████╗██║   ██║██████╔╝██║   ██║█████╗  ██╔██╗ ██║██║   ██║██╔████╔██║[/bold green]
+[green]  ╚════██║██║   ██║██╔══██╗╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║[/green]
+[green]  ███████║╚██████╔╝██████╔╝ ╚████╔╝ ███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║[/green]
+[green]  ╚══════╝ ╚═════╝ ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝[/green]
 """
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -137,6 +135,29 @@ def source_crtsh(domain: str) -> set[str]:
                     name = name.strip().lstrip("*.")
                     if name.endswith(f".{domain}") or name == domain:
                         subs.add(name.lower())
+            return subs
+    except Exception:
+        pass
+    return set()
+
+
+def source_certspotter(domain: str) -> set[str]:
+    """SSLMate CertSpotter CT-log API (free tier, no key). A reliable second
+    certificate-transparency source — catches names crt.sh misses and still
+    answers when crt.sh is rate-limited or down (which is often)."""
+    try:
+        r = requests.get(
+            f"https://api.certspotter.com/v1/issuances?domain={domain}"
+            "&include_subdomains=true&expand=dns_names",
+            timeout=TIMEOUT, headers=HEADERS
+        )
+        if r.status_code == 200:
+            subs = set()
+            for entry in r.json():
+                for name in entry.get("dns_names", []):
+                    name = name.strip().lstrip("*.").lower()
+                    if name.endswith(f".{domain}") or name == domain:
+                        subs.add(name)
             return subs
     except Exception:
         pass
@@ -483,6 +504,7 @@ def print_section(title: str):
 
 SOURCES = {
     "crt.sh":       source_crtsh,        # cert transparency — very reliable
+    "CertSpotter":  source_certspotter,  # cert transparency — reliable crt.sh backup
     "HackerTarget": source_hackertarget, # passive DNS
     "AlienVault":   source_alienvault,   # threat intel (may rate limit)
     "URLScan":      source_urlscan,      # web crawl dataset
