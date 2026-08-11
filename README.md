@@ -79,7 +79,7 @@ CDN/WAF · Next.js · React · Angular · Vue · WordPress · Drupal · Laravel 
 
 ## API Keys
 
-Shodan key is stored in `~/.config/subvenom/config.yaml` — local only, never committed.
+Enter your Shodan key
 
 ```bash
 subvenom --set-shodan YOUR_KEY
